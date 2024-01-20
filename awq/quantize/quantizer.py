@@ -9,7 +9,11 @@ from collections import defaultdict
 from awq.utils.utils import clear_memory
 from awq.utils.calib_data import get_calib_dataset
 from awq.quantize.scale import apply_scale, apply_clip
-from awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV
+from awq.modules.linear import (
+    WQLinear_GEMM,
+    WQLinear_GEMV,
+    WQLinear_Marlin,
+)
 from awq.utils.module import (
     append_str_prefix,
     get_op_name,
@@ -37,7 +41,12 @@ class AwqQuantizer:
         self.modules_to_not_convert = modules_to_not_convert if modules_to_not_convert is not None else []
         self.modules, self.module_kwargs, self.inps = self.init_quant()
     
-    def pseudo_quantize_tensor(self, w: torch.Tensor, get_scale_zp=False):
+    def pseudo_quantize_tensor(
+        self,
+        w: torch.Tensor,
+        get_scale_zp=False,
+        use_zero_point=True,
+    ):
         org_w_shape = w.shape
         if self.group_size > 0:
             assert org_w_shape[-1] % self.group_size == 0
@@ -45,12 +54,20 @@ class AwqQuantizer:
         assert w.dim() == 2
 
         # zero point quantization
-        max_val = w.amax(dim=1, keepdim=True)
-        min_val = w.amin(dim=1, keepdim=True)
-        max_int = 2 ** self.w_bit - 1
-        min_int = 0
-        scales = (max_val - min_val).clamp(min=1e-5) / max_int
-        zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+        if use_zero_point:
+            max_val = w.amax(dim=1, keepdim=True)
+            min_val = w.amin(dim=1, keepdim=True)
+            max_int = 2 ** self.w_bit - 1
+            min_int = 0
+            scales = (max_val - min_val).clamp(min=1e-5) / max_int
+            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+        else:
+            max_val = w.abs().amax(dim=1, keepdim=True)
+            max_val = max_val.clamp(min=1e-5)
+            max_int = 2 ** (self.w_bit - 1) - 1
+            min_int = - 2 ** (self.w_bit - 1)
+            scales = max_val / max_int
+            zeros = 0
 
         assert torch.isnan(scales).sum() == 0
         assert torch.isnan(w).sum() == 0
@@ -61,7 +78,8 @@ class AwqQuantizer:
         w = w.reshape(org_w_shape)
 
         if get_scale_zp:
-            return w, scales.view(w.shape[0], -1), zeros.view(w.shape[0], -1)
+            out_zeros = zeros.view(w.shape[0], -1) if use_zero_point else zeros
+            return w, scales.view(w.shape[0], -1), out_zeros
         else:
             return w
     
@@ -139,22 +157,30 @@ class AwqQuantizer:
                 get_scale_zp=True
             )
 
-            if self.version == 'GEMM':
-                scales = scales.t().contiguous()
-                zeros = zeros.t().contiguous()
-                q_linear_module = WQLinear_GEMM
+            if self.version == 'Marlin':
+                q_linear = WQLinear_Marlin(
+                    infeatures=linear_layer.in_features,
+                    outfeatures=linear_layer.out_features,
+                    groupsize=self.group_size,
+                )
+                q_linear.pack(linear_layer, scales)
+            else:
+                if self.version == 'GEMM':
+                    scales = scales.t().contiguous()
+                    zeros = zeros.t().contiguous()
+                    q_linear_module = WQLinear_GEMM
 
-            elif self.version  == 'GEMV':
-                q_linear_module = WQLinear_GEMV
-            
-            q_linear = q_linear_module.from_linear(
-                linear=linear_layer,
-                w_bit=self.w_bit,
-                group_size=self.group_size,
-                init_only=False,
-                scales=scales,
-                zeros=zeros
-            )
+                elif self.version  == 'GEMV':
+                    q_linear_module = WQLinear_GEMV
+                
+                q_linear = q_linear_module.from_linear(
+                    linear=linear_layer,
+                    w_bit=self.w_bit,
+                    group_size=self.group_size,
+                    init_only=False,
+                    scales=scales,
+                    zeros=zeros
+                )
 
             linear_layer.cpu()
             q_linear.to(next(module.parameters()).device)

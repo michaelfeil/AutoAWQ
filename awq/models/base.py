@@ -13,7 +13,11 @@ from huggingface_hub import snapshot_download
 import transformers
 from transformers.modeling_utils import shard_checkpoint
 
-from awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV
+from awq.modules.linear import (
+    WQLinear_GEMM,
+    WQLinear_GEMV,
+    WQLinear_Marlin,
+)
 from awq.utils.module import (
     get_named_linears,
     set_op_by_name,
@@ -33,7 +37,6 @@ from accelerate.big_modeling import (
 
 from awq.models._config import AwqConfig
 from awq.modules.act import ScaledActivation
-from awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV
 from awq.quantize.quantizer import AwqQuantizer
 from awq.utils.module import get_named_linears, set_op_by_name
 
@@ -297,17 +300,24 @@ class BaseAWQForCausalLM(nn.Module):
 
             # Replace nn.Linear with WQLinear
             for name, module in named_linears.items():
-                if version == 'GEMM':
-                    q_linear_module = WQLinear_GEMM
-                elif version == 'GEMV':
-                    q_linear_module = WQLinear_GEMV
-                
-                q_linear = q_linear_module.from_linear(
-                    module,
-                    quant_config.w_bit,
-                    quant_config.q_group_size,
-                    True
-                )
+                if version == 'Marlin':
+                    q_linear = WQLinear_Marlin(
+                        infeatures=module.in_features,
+                        outfeatures=module.out_features,
+                        groupsize=quant_config.group_size,
+                    )
+                else:
+                    if version == 'GEMM':
+                        q_linear_module = WQLinear_GEMM
+                    elif version == 'GEMV':
+                        q_linear_module = WQLinear_GEMV
+                    
+                    q_linear = q_linear_module.from_linear(
+                        module,
+                        quant_config.w_bit,
+                        quant_config.q_group_size,
+                        True
+                    )
                 q_linear.to(next(layer.parameters()).device)
                 set_op_by_name(layer, name, q_linear)
             
