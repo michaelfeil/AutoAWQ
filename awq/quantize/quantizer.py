@@ -152,19 +152,27 @@ class AwqQuantizer:
             # NOTE: small regression in perplexity if linear layer uses .cpu().float()
             linear_layer = linear_layer.cuda().half()
 
-            linear_layer.weight.data, scales, zeros = self.pseudo_quantize_tensor(
-                linear_layer.weight.data, 
-                get_scale_zp=True
-            )
-
             if self.version == 'Marlin':
+                linear_layer.weight.data, scales, zeros = self.pseudo_quantize_tensor(
+                    linear_layer.weight.data,
+                    get_scale_zp=True,
+                    use_zero_point=False,
+                )
+
                 q_linear = WQLinear_Marlin(
                     infeatures=linear_layer.in_features,
                     outfeatures=linear_layer.out_features,
                     groupsize=self.group_size,
                 )
+                scales = scales.t().contiguous()
                 q_linear.pack(linear_layer, scales)
             else:
+                linear_layer.weight.data, scales, zeros = self.pseudo_quantize_tensor(
+                    linear_layer.weight.data,
+                    get_scale_zp=True,
+                    use_zero_point=True,
+                )
+                                
                 if self.version == 'GEMM':
                     scales = scales.t().contiguous()
                     zeros = zeros.t().contiguous()

@@ -304,7 +304,7 @@ class BaseAWQForCausalLM(nn.Module):
                     q_linear = WQLinear_Marlin(
                         infeatures=module.in_features,
                         outfeatures=module.out_features,
-                        groupsize=quant_config.group_size,
+                        groupsize=quant_config.q_group_size,
                     )
                 else:
                     if version == 'GEMM':
