@@ -12,8 +12,8 @@ from awq.quantize.scale import apply_scale, apply_clip
 from awq.modules.linear import (
     WQLinear_GEMM,
     WQLinear_GEMV,
-    WQLinear_Marlin,
 )
+from awq.modules.marlin import WQLinear_Marlin
 from awq.utils.module import (
     append_str_prefix,
     get_op_name,
@@ -160,9 +160,11 @@ class AwqQuantizer:
                 )
 
                 q_linear = WQLinear_Marlin(
+                    self.w_bit,
+                    self.group_size,
                     infeatures=linear_layer.in_features,
                     outfeatures=linear_layer.out_features,
-                    groupsize=self.group_size,
+                    bias=None
                 )
                 scales = scales.t().contiguous()
                 q_linear.pack(linear_layer, scales)

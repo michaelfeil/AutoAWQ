@@ -16,8 +16,8 @@ from transformers.modeling_utils import shard_checkpoint
 from awq.modules.linear import (
     WQLinear_GEMM,
     WQLinear_GEMV,
-    WQLinear_Marlin,
 )
+from awq.modules.marlin import WQLinear_Marlin, dequantize_weight
 from awq.utils.module import (
     get_named_linears,
     set_op_by_name,
@@ -239,9 +239,43 @@ class BaseAWQForCausalLM(nn.Module):
         # Dispath to devices
         if fuse_layers:
             self.fuse_layers(model)
+        
+        # self._load_marlin(model)
 
         return self(model, model_type, is_quantized=is_quantized, config=config,
                     quant_config=quant_config, processor=None)
+
+    def _load_marlin(self, model):
+        for layer in tqdm(model.model.layers):
+            for name, module in layer.named_modules():
+                if isinstance(module, WQLinear_GEMM):
+                    dequantized_weights, unpacked_qzeros = dequantize_weight(
+                        module.qweight,
+                        module.qzeros,
+                        module.scales,
+                        module.group_size,
+                        module.w_bit
+                    )
+                    dequantized_weights = dequantized_weights.to(torch.float16)
+
+                    linear = nn.Linear(
+                        in_features=dequantized_weights.shape[1],
+                        out_features=dequantized_weights.shape[0],
+                        bias=False,
+                        dtype=torch.float16,
+                        device="cuda",
+                    )
+                    linear.weight.data.copy_(dequantized_weights)
+
+                    marlin_linear = WQLinear_Marlin(
+                        module.w_bit,
+                        module.group_size,
+                        module.in_features,
+                        module.out_features,
+                        None
+                    )
+                    marlin_linear.pack(linear, scales=module.scales.data.t())
+                    set_op_by_name(layer, name, marlin_linear)
 
     def _load_config(self, model_path, model_filename, safetensors=True, 
                            version="GEMM", trust_remote_code=True, max_new_tokens=4096,
@@ -302,9 +336,11 @@ class BaseAWQForCausalLM(nn.Module):
             for name, module in named_linears.items():
                 if version == 'Marlin':
                     q_linear = WQLinear_Marlin(
+                        quant_config.w_bit,
+                        quant_config.q_group_size,
                         infeatures=module.in_features,
                         outfeatures=module.out_features,
-                        groupsize=quant_config.q_group_size,
+                        bias=None
                     )
                 else:
                     if version == 'GEMM':

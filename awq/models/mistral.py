@@ -127,3 +127,5 @@ class MistralFuser:
             self.model.model.embed_tokens,
             self.model.model.norm,
         )
+
+        setattr(self.model.model, "blocks", self.model.model.blocks)
